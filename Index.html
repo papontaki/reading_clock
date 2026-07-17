@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>とけいリーダー</title>
+<style>
+:root{
+  --bg:#f4f7fb;--card:#fff;--text:#182230;--muted:#687386;
+  --accent:#2563eb;--accent2:#dbeafe;--line:#d9e1ec;--ok:#16865a;--warn:#b45309;
+}
+*{box-sizing:border-box}
+body{margin:0;font-family:system-ui,-apple-system,"Segoe UI",sans-serif;background:var(--bg);color:var(--text)}
+.app{max-width:820px;margin:auto;padding:20px 14px 50px}
+header{text-align:center;margin:8px 0 18px}
+h1{margin:0;font-size:28px} header p{margin:7px 0;color:var(--muted)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:20px;padding:16px;margin-bottom:14px}
+.viewer{position:relative;overflow:hidden;border-radius:16px;background:#111;aspect-ratio:4/3}
+video,canvas,#photo{width:100%;height:100%;object-fit:contain;display:block}
+#photo{display:none}
+#overlay{position:absolute;inset:0;pointer-events:none}
+.guide{position:absolute;width:72%;aspect-ratio:1;border:3px dashed #ffffffcc;border-radius:50%;left:14%;top:50%;transform:translateY(-50%);box-shadow:0 0 0 999px #0004}
+.controls{display:flex;flex-wrap:wrap;gap:10px;margin-top:14px}
+button,.filelabel{border:1px solid var(--line);border-radius:12px;padding:11px 15px;font-size:15px;background:#fff;color:var(--text);cursor:pointer;font-weight:600}
+.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+button:disabled{opacity:.45;cursor:not-allowed}
+input[type=file]{display:none}
+.result{text-align:center;padding:4px}
+.time{font-size:52px;font-weight:800;letter-spacing:.04em;margin:4px 0}
+.words{font-size:19px;color:var(--accent);font-weight:700}
+.status{color:var(--muted);font-size:14px;min-height:22px;margin-top:8px}
+.conf{display:inline-block;margin-top:10px;background:var(--accent2);color:#174ea6;padding:6px 10px;border-radius:99px;font-size:13px}
+.tips{font-size:14px;color:var(--muted);line-height:1.7}
+.tips b{color:var(--text)}
+.manual{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+label{font-size:13px;color:var(--muted)}
+input[type=range]{width:100%}
+.value{font-size:20px;color:var(--text);font-weight:700}
+@media(max-width:540px){.time{font-size:42px}.manual{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="app">
+<header>
+  <h1>🕒 とけいリーダー</h1>
+  <p>カメラでアナログ時計を映すと、針から時刻を読み取ります。</p>
+</header>
+
+<section class="card">
+  <div class="viewer">
+    <video id="video" playsinline autoplay muted></video>
+    <img id="photo" alt="選択した時計の写真">
+    <canvas id="work" hidden></canvas>
+    <canvas id="overlay"></canvas>
+    <div class="guide" id="guide"></div>
+  </div>
+  <div class="controls">
+    <button class="primary" id="start">カメラを起動</button>
+    <button id="read" disabled>この時計を読む</button>
+    <label class="filelabel">写真を選ぶ<input id="file" type="file" accept="image/*"></label>
+    <button id="retry">やり直す</button>
+  </div>
+</section>
+
+<section class="card result" aria-live="polite">
+  <div class="status" id="status">時計全体が円の中に入るように映してください。</div>
+  <div class="time" id="time">--:--</div>
+  <div class="words" id="words">時刻を読み取ると、ここに表示されます</div>
+  <span class="conf" id="confidence" hidden></span>
+</section>
+
+<section class="card">
+  <details>
+    <summary><b>読み取り結果を手動で調整</b></summary>
+    <div class="manual" style="margin-top:16px">
+      <label>短い針（時針）
+        <div class="value"><span id="hourVal">12</span>時</div>
+        <input id="hour" type="range" min="1" max="12" value="12">
+      </label>
+      <label>長い針（分針）
+        <div class="value"><span id="minuteVal">0</span>分</div>
+        <input id="minute" type="range" min="0" max="59" value="0">
+      </label>
+    </div>
+  </details>
+</section>
+
+<section class="card tips">
+  <b>読み取りやすくするコツ</b><br>
+  正面から映す・文字盤を明るくする・背景をシンプルにする・秒針が目立つ時計では撮影時に少し静止する。<br>
+  装飾の多い文字盤や針と文字盤の色が近い時計では、手動調整が必要な場合があります。
+</section>
+</div>
+
+<script>
+const video=document.getElementById('video');
+const photo=document.getElementById('photo');
+const work=document.getElementById('work');
+const overlay=document.getElementById('overlay');
+const ctx=work.getContext('2d',{willReadFrequently:true});
+const octx=overlay.getContext('2d');
+const startBtn=document.getElementById('start');
+const readBtn=document.getElementById('read');
+const retryBtn=document.getElementById('retry');
+const fileInput=document.getElementById('file');
+const statusEl=document.getElementById('status');
+const timeEl=document.getElementById('time');
+const wordsEl=document.getElementById('words');
+const confEl=document.getElementById('confidence');
+const guide=document.getElementById('guide');
+const hourRange=document.getElementById('hour');
+const minuteRange=document.getElementById('minute');
+let stream=null, source='video';
+
+function setResult(h,m,confidence){
+  h=((h-1+12)%12)+1; m=(m+60)%60;
+  timeEl.textContent=String(h).padStart(2,'0')+':'+String(m).padStart(2,'0');
+  wordsEl.textContent=`${h}時 ${m}分`;
+  hourRange.value=h; minuteRange.value=m;
+  document.getElementById('hourVal').textContent=h;
+  document.getElementById('minuteVal').textContent=m;
+  if(confidence!=null){
+    confEl.hidden=false;
+    confEl.textContent=`読み取り信頼度 ${Math.round(confidence*100)}%`;
+  }
+}
+
+async function startCamera(){
+  try{
+    if(stream) stream.getTracks().forEach(t=>t.stop());
+    stream=await navigator.mediaDevices.getUserMedia({
+      video:{facingMode:{ideal:'environment'},width:{ideal:1280},height:{ideal:1280}},
+      audio:false
+    });
+    video.srcObject=stream;
+    video.style.display='block'; photo.style.display='none';
+    source='video'; readBtn.disabled=false;
+    statusEl.textContent='時計を円の中央に合わせて「この時計を読む」を押してください。';
+  }catch(e){
+    statusEl.textContent='カメラを起動できません。ブラウザのカメラ許可を確認するか、写真を選んでください。';
+  }
+}
+
+function angleDiff(a,b){
+  let d=Math.abs(a-b)%360; return Math.min(d,360-d);
+}
+
+function analyze(){
+  const src=source==='video'?video:photo;
+  const sw=source==='video'?video.videoWidth:photo.naturalWidth;
+  const sh=source==='video'?video.videoHeight:photo.naturalHeight;
+  if(!sw||!sh){statusEl.textContent='画像を読み込めませんでした。';return}
+
+  const size=600;
+  work.width=work.height=size;
+  const side=Math.min(sw,sh), sx=(sw-side)/2, sy=(sh-side)/2;
+  ctx.drawImage(src,sx,sy,side,side,0,0,size,size);
+  const img=ctx.getImageData(0,0,size,size);
+  const data=img.data, gray=new Float32Array(size*size);
+
+  let sum=0;
+  for(let i=0,p=0;i<data.length;i+=4,p++){
+    const g=.299*data[i]+.587*data[i+1]+.114*data[i+2];
+    gray[p]=g; sum+=g;
+  }
+  const mean=sum/gray.length;
+  const cx=size/2, cy=size/2, minR=size*.06, maxR=size*.37;
+  const candidates=[];
+
+  for(let deg=0;deg<360;deg+=0.5){
+    const rad=(deg-90)*Math.PI/180;
+    let score=0, darkCount=0, longest=0, run=0;
+    for(let r=minR;r<maxR;r+=2){
+      let local=0,n=0;
+      const px=-Math.sin(rad), py=Math.cos(rad);
+      for(let w=-3;w<=3;w+=2){
+        const x=Math.round(cx+Math.cos(rad)*r+px*w);
+        const y=Math.round(cy+Math.sin(rad)*r+py*w);
+        if(x>=1&&x<size-1&&y>=1&&y<size-1){local+=gray[y*size+x];n++}
+      }
+      local/=Math.max(n,1);
+      const darkness=Math.max(0,(mean-local)/80);
+      score+=darkness*(1+r/maxR*.35);
+      if(darkness>.28){darkCount++;run++;longest=Math.max(longest,run)} else run=0;
+    }
+    candidates.push({deg,score,darkCount,longest});
+  }
+
+  candidates.sort((a,b)=>b.score-a.score);
+  const peaks=[];
+  for(const c of candidates){
+    if(peaks.every(p=>angleDiff(p.deg,c.deg)>12)) peaks.push(c);
+    if(peaks.length>=7) break;
+  }
+  if(peaks.length<2){statusEl.textContent='針を見つけられませんでした。明るさや角度を変えてください。';return}
+
+  let best=null;
+  for(let i=0;i<peaks.length;i++) for(let j=i+1;j<peaks.length;j++){
+    const a=peaks[i],b=peaks[j];
+    const sep=angleDiff(a.deg,b.deg);
+    if(sep<15) continue;
+    const quality=a.score+b.score + .2*(a.longest+b.longest);
+    if(!best||quality>best.quality) best={a,b,quality};
+  }
+  if(!best){statusEl.textContent='2本の針を区別できませんでした。';return}
+
+  let minuteHand=best.a.longest>=best.b.longest?best.a:best.b;
+  let hourHand=minuteHand===best.a?best.b:best.a;
+  if(Math.abs(best.a.longest-best.b.longest)<4){
+    minuteHand=best.a.score>=best.b.score?best.a:best.b;
+    hourHand=minuteHand===best.a?best.b:best.a;
+  }
+
+  let minute=Math.round(minuteHand.deg/6)%60;
+  let rawHour=hourHand.deg/30;
+  let hour=Math.round(rawHour-minute/60)%12;
+  if(hour===0) hour=12;
+
+  const normalized=Math.min(1,(best.a.score+best.b.score)/95);
+  const confidence=Math.max(.35,Math.min(.94,normalized));
+  setResult(hour,minute,confidence);
+  statusEl.textContent='読み取りました。結果が違う場合は、下のスライダーで調整できます。';
+  drawHands(hourHand.deg,minuteHand.deg);
+}
+
+function drawHands(hDeg,mDeg){
+  const rect=overlay.getBoundingClientRect();
+  overlay.width=Math.round(rect.width*devicePixelRatio);
+  overlay.height=Math.round(rect.height*devicePixelRatio);
+  octx.setTransform(devicePixelRatio,0,0,devicePixelRatio,0,0);
+  const cx=rect.width/2,cy=rect.height/2,r=Math.min(rect.width,rect.height)*.32;
+  octx.clearRect(0,0,rect.width,rect.height);
+  function line(deg,len,width,color){
+    const rad=(deg-90)*Math.PI/180;
+    octx.beginPath();octx.moveTo(cx,cy);octx.lineTo(cx+Math.cos(rad)*len,cy+Math.sin(rad)*len);
+    octx.strokeStyle=color;octx.lineWidth=width;octx.lineCap='round';octx.stroke();
+  }
+  line(hDeg,r*.66,7,'#ffb020'); line(mDeg,r,5,'#42d392');
+  octx.beginPath();octx.arc(cx,cy,6,0,Math.PI*2);octx.fillStyle='#fff';octx.fill();
+}
+
+fileInput.addEventListener('change',()=>{
+  const f=fileInput.files[0]; if(!f)return;
+  const url=URL.createObjectURL(f);
+  photo.onload=()=>{URL.revokeObjectURL(url);source='photo';photo.style.display='block';video.style.display='none';readBtn.disabled=false;statusEl.textContent='写真を読み込めました。「この時計を読む」を押してください。'};
+  photo.src=url;
+});
+startBtn.addEventListener('click',startCamera);
+readBtn.addEventListener('click',analyze);
+retryBtn.addEventListener('click',()=>{
+  timeEl.textContent='--:--';wordsEl.textContent='時刻を読み取ると、ここに表示されます';
+  confEl.hidden=true;octx.clearRect(0,0,overlay.width,overlay.height);
+  statusEl.textContent='時計全体が円の中に入るように映してください。';
+});
+hourRange.addEventListener('input',()=>{
+  document.getElementById('hourVal').textContent=hourRange.value;
+  setResult(+hourRange.value,+minuteRange.value,null);confEl.hidden=true;
+});
+minuteRange.addEventListener('input',()=>{
+  document.getElementById('minuteVal').textContent=minuteRange.value;
+  setResult(+hourRange.value,+minuteRange.value,null);confEl.hidden=true;
+});
+window.addEventListener('resize',()=>octx.clearRect(0,0,overlay.width,overlay.height));
+</script>
+</body>
+</html>
